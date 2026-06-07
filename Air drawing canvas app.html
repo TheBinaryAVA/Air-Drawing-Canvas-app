@@ -1,0 +1,269 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Neon Air Canvas</title>
+    
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
+
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            background-color: #121212;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            color: #fff;
+            overflow: hidden;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            height: 100vh;
+        }
+
+        #container {
+            position: relative;
+            width: 800px;
+            height: 600px;
+            border-radius: 12px;
+            overflow: hidden;
+            box-shadow: 0 0 30px rgba(0, 0, 0, 0.7);
+        }
+
+        /* Mirror the webcam and canvas for intuitive drawing */
+        video, canvas {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 800px;
+            height: 600px;
+            transform: scaleX(-1);
+        }
+
+        video {
+            opacity: 0.15; /* Keeps background dark so neon pops */
+            object-fit: cover;
+        }
+
+        canvas {
+            background: transparent;
+            z-index: 2;
+        }
+
+        /* UI Controls overlay */
+        #controls {
+            position: absolute;
+            bottom: 20px;
+            left: 50%;
+            transform: translateX(-50%);
+            z-index: 10;
+            background: rgba(30, 30, 30, 0.85);
+            padding: 15px 25px;
+            border-radius: 50px;
+            display: flex;
+            gap: 20px;
+            align-items: center;
+            backdrop-filter: blur(10px);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            box-shadow: 0 10px 25px rgba(0,0,0,0.5);
+        }
+
+        .control-group {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        label {
+            font-size: 14px;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            color: #aaa;
+        }
+
+        input[type="color"] {
+            border: none;
+            width: 40px;
+            height: 40px;
+            border-radius: 50%;
+            cursor: pointer;
+            background: none;
+        }
+
+        input[type="range"] {
+            accent-color: #00ffcc;
+            cursor: pointer;
+        }
+
+        #status-badge {
+            background: #ff0055;
+            padding: 6px 14px;
+            border-radius: 20px;
+            font-size: 12px;
+            text-transform: uppercase;
+            font-weight: bold;
+            box-shadow: 0 0 10px rgba(255, 0, 85, 0.4);
+            transition: all 0.3s ease;
+        }
+    </style>
+</head>
+<body>
+
+    <h2 style="margin-bottom: 10px; color: #00ffcc; text-shadow: 0 0 10px rgba(0,255,204,0.3);">Neon Air Canvas</h2>
+    <p style="margin: 0 0 20px 0; color: #888; font-size: 14px;">☝️ Index Finger = Draw | 🖐️ Open Palm = Clear Canvas | ✊ Closed Fist = Pause</p>
+
+    <div id="container">
+        <video id="webcam" autoplay playsinline></video>
+        <canvas id="paintCanvas" width="800" height="600"></canvas>
+        
+        <div id="controls">
+            <div class="control-group">
+                <label for="colorPicker">Color</label>
+                <input type="color" id="colorPicker" value="#00ffcc">
+            </div>
+            
+            <div class="control-group">
+                <label for="thicknessSlider">Thickness</label>
+                <input type="range" id="thicknessSlider" min="2" max="30" value="8">
+            </div>
+
+            <div id="status-badge">No Hand</div>
+        </div>
+    </div>
+
+    <script>
+        const videoElement = document.getElementById('webcam');
+        const canvasElement = document.getElementById('paintCanvas');
+        const ctx = canvasElement.getContext('2d');
+        const colorPicker = document.getElementById('colorPicker');
+        const thicknessSlider = document.getElementById('thicknessSlider');
+        const statusBadge = document.getElementById('status-badge');
+
+        let isDrawing = false;
+        let lastX = 0;
+        let lastY = 0;
+
+        // Configure canvas neon glow styles
+        function applyNeonStyles() {
+            ctx.strokeStyle = colorPicker.value;
+            ctx.lineWidth = thicknessSlider.value;
+            ctx.lineCap = 'round';
+            ctx.lineJoin = 'round';
+            ctx.shadowColor = colorPicker.value;
+            ctx.shadowBlur = 15; // Creates the neon trail effect
+        }
+
+        // Helper to calculate distance between two points
+        function getDistance(p1, p2) {
+            return Math.hypot(p1.x - p2.x, p1.y - p2.y);
+        }
+
+        function onResults(results) {
+            // If no hand is detected
+            if (!results.multiHandLandmarks || results.multiHandLandmarks.length === 0) {
+                statusBadge.textContent = "No Hand";
+                statusBadge.style.background = "#555";
+                statusBadge.style.boxShadow = "none";
+                isDrawing = false;
+                return;
+            }
+
+            const landmarks = results.multiHandLandmarks[0];
+
+            // Extract essential landmarks for gesture recognition
+            const wrist = landmarks[0];
+            const indexTip = landmarks[8];
+            const indexPip = landmarks[6];
+            const middleTip = landmarks[12];
+            const ringTip = landmarks[16];
+            const pinkyTip = landmarks[20];
+
+            // Convert normalized coordinates to canvas pixels
+            const currentX = indexTip.x * canvasElement.width;
+            const currentY = indexTip.y * canvasElement.height;
+
+            // --- GESTURE DETECTION ---
+            
+            // 1. Check for Open Palm (Erase)
+            // If major fingers are extended far away from the wrist, it's an open palm.
+            const isOpenPalm = 
+                getDistance(indexTip, wrist) > 0.4 &&
+                getDistance(middleTip, wrist) > 0.4 &&
+                getDistance(ringTip, wrist) > 0.4 &&
+                getDistance(pinkyTip, wrist) > 0.4;
+
+            // 2. Check for Closed Fist (Pause)
+            // If fingers are curled up close to the wrist/palm area.
+            const isClosedFist = 
+                getDistance(indexTip, wrist) < 0.25 &&
+                getDistance(middleTip, wrist) < 0.25 &&
+                getDistance(ringTip, wrist) < 0.25 &&
+                getDistance(pinkyTip, wrist) < 0.25;
+
+            // --- ACTION EXECUTION ---
+            if (isOpenPalm) {
+                statusBadge.textContent = "Erasing Canvas";
+                statusBadge.style.background = "#ffcc00";
+                statusBadge.style.boxShadow = "0 0 10px rgba(255,204,0,0.5)";
+                
+                // Clear the canvas
+                ctx.clearRect(0, 0, canvasElement.width, canvasElement.height);
+                isDrawing = false;
+                
+            } else if (isClosedFist) {
+                statusBadge.textContent = "Paused";
+                statusBadge.style.background = "#ff0055";
+                statusBadge.style.boxShadow = "0 0 10px rgba(255,0,85,0.5)";
+                isDrawing = false;
+                
+            } else {
+                // Default: Drawing mode (Index finger up)
+                statusBadge.textContent = "Drawing";
+                statusBadge.style.background = "#00ffcc";
+                statusBadge.style.boxShadow = "0 0 10px rgba(0,255,204,0.5)";
+
+                if (isDrawing) {
+                    ctx.beginPath();
+                    applyNeonStyles();
+                    ctx.moveTo(lastX, lastY);
+                    ctx.lineTo(currentX, currentY);
+                    ctx.stroke();
+                }
+                
+                // Update tracking position
+                lastX = currentX;
+                lastY = currentY;
+                isDrawing = true;
+            }
+        }
+
+        // Initialize MediaPipe Hands
+        const hands = new Hands({
+            locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`
+        });
+
+        hands.setOptions({
+            maxNumHands: 1,
+            modelComplexity: 1,
+            minDetectionConfidence: 0.7,
+            minTrackingConfidence: 0.7
+        });
+
+        hands.onResults(onResults);
+
+        // Instantiate Camera Utility
+        const camera = new Camera(videoElement, {
+            onFrame: async () => {
+                await hands.send({ image: videoElement });
+            },
+            width: 800,
+            height: 600
+        });
+
+        camera.start();
+    </script>
+</body>
+</html>
